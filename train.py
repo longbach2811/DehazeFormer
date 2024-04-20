@@ -10,13 +10,14 @@ from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
 from utils import AverageMeter
+from utils.loss import MS_SSIM_L1_LOSS
 from datasets.loader import PairLoader
 from models import *
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', default='dehazeformer-s', type=str, help='model name')
-parser.add_argument('--num_workers', default=16, type=int, help='number of workers')
+parser.add_argument('--num_workers', default=0, type=int, help='number of workers')
 parser.add_argument('--no_autocast', action='store_false', default=True, help='disable autocast')
 parser.add_argument('--save_dir', default='./saved_models/', type=str, help='path to models saving')
 parser.add_argument('--data_dir', default='./data/', type=str, help='path to dataset')
@@ -74,6 +75,14 @@ def valid(val_loader, network):
 
 	return PSNR.avg
 
+def collate_fn_replace_corrupted(batch, dataset):
+    if batch[0] is None:
+        batch = [dataset[torch.randint(0, len(dataset) - 1)]]
+        return collate_fn_replace_corrupted(batch, dataset)
+
+    return torch.utils.data.dataloader.default_collate(batch)
+
+import functools
 
 if __name__ == '__main__':
 	setting_filename = os.path.join('configs', args.exp, args.model+'.json')
@@ -85,7 +94,7 @@ if __name__ == '__main__':
 	network = eval(args.model.replace('-', '_'))()
 	network = nn.DataParallel(network).cuda()
 
-	criterion = nn.L1Loss()
+	criterion = MS_SSIM_L1_LOSS()
 
 	if setting['optimizer'] == 'adam':
 		optimizer = torch.optim.Adam(network.parameters(), lr=setting['lr'])
@@ -100,17 +109,22 @@ if __name__ == '__main__':
 	dataset_dir = os.path.join(args.data_dir, args.dataset)
 	train_dataset = PairLoader(dataset_dir, 'train', 'train', 
 								setting['patch_size'], setting['edge_decay'], setting['only_h_flip'])
+	collate_fn_train = functools.partial(collate_fn_replace_corrupted, dataset=train_dataset)
+	
 	train_loader = DataLoader(train_dataset,
                               batch_size=setting['batch_size'],
                               shuffle=True,
-                              num_workers=args.num_workers,
                               pin_memory=True,
+							  collate_fn=collate_fn_train,
                               drop_last=True)
 	val_dataset = PairLoader(dataset_dir, 'test', setting['valid_mode'], 
 							  setting['patch_size'])
+	
+	collate_fn_val = functools.partial(collate_fn_replace_corrupted, dataset=val_dataset)
+
 	val_loader = DataLoader(val_dataset,
                             batch_size=setting['batch_size'],
-                            num_workers=args.num_workers,
+							collate_fn=collate_fn_val,
                             pin_memory=True)
 
 	save_dir = os.path.join(args.save_dir, args.exp)
